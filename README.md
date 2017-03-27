@@ -20,18 +20,18 @@ concurrency: 25
 delay: 25
 queues:
   - [high_priority, 6]
-  - [default, 2]
+  - [normal_priority, 2]
   - [low_priority, 1]
 ```
 
-And supposing all the queues are full of messages, the configuration above will make Shoryuken to process `high_priority` 3 times more than `default` and 6 times more than `low_priority`,
-splitting the work among the `concurrency: 25` available processors.
+And supposing all the queues are full of messages, the configuration above will make Shoryuken to process `high_priority` 3 times more than `normal_priority` and 6 times more than `low_priority`,
+splitting the work load among all available processors `concurrency: 25` .
 
-If `high_priority` gets empty, Shoryuken will keep using the 25 processors, but only to process `default` (2 times more than `low_priority`) and `low_priority`.
+If `high_priority` gets empty, Shoryuken will keep using the 25 processors, but only to process `normal_priority` and `low_priority`.
 
-If `high_priority` receives a new message, Shoryuken will smoothly increase back the `high_priority` weight one by one until it reaches the weight of 6 again, which is the maximum configured for `high_priority`.
+If `high_priority` receives a new message, Shoryuken will smoothly increase back its weight one by one until it reaches the weight of 6 again.
 
-If all queues get empty, all processors will be changed to the waiting state and the queues will be checked every `delay: 25`. If any queue receives a new message, Shoryuken will start processing again. [Check the delay option documentation for more information](https://github.com/phstc/shoryuken/wiki/Shoryuken-options#delay).
+[If a queue gets empty, Shoryuken will pause checking it for `delay: 25`](https://github.com/phstc/shoryuken/wiki/Shoryuken-options#delay).
 
 
 ### Fetch in batches
@@ -40,7 +40,7 @@ To be even more performant and cost effective, Shoryuken fetches SQS messages in
 
 ## Requirements
 
-Ruby 2.0 or greater. Ruby 1.9 is no longer supported.
+Ruby 2.0 or greater.
 
 ## Installation
 
@@ -105,36 +105,22 @@ end
 
 [Check the Middleware documentation](https://github.com/phstc/shoryuken/wiki/Middleware).
 
-### Configuration
+### Shoryuken Configuration
 
 Sample configuration file `shoryuken.yml`.
 
 ```yaml
-aws:
-  access_key_id:      ...       # or <%= ENV['AWS_ACCESS_KEY_ID'] %>
-  secret_access_key:  ...       # or <%= ENV['AWS_SECRET_ACCESS_KEY'] %>
-  region:             us-east-1 # or <%= ENV['AWS_REGION'] %>
-  receive_message:              # See http://docs.aws.amazon.com/sdkforruby/api/Aws/SQS/Client.html#receive_message-instance_method
-    # wait_time_seconds: N      # The number of seconds to wait for new messages when polling. Defaults to the #wait_time_seconds defined on the queue
-    attribute_names:
-      - ApproximateReceiveCount
-      - SentTimestamp
 concurrency: 25  # The number of allocated threads to process messages. Default 25
 delay: 25        # The delay in seconds to pause a queue when it's empty. Default 0
 queues:
   - [high_priority, 6]
-  - [default, 2]
+  - [normal_priority, 2]
   - [low_priority, 1]
 ```
 
-The ```aws``` section is used to configure both the Aws objects used by Shoryuken internally, and also to set up some Shoryuken-specific config. The Shoryuken-specific keys are listed below, and you can expect any other key defined in that block to be passed on untouched to ```Aws::SQS::Client#initialize```:
+#### AWS Configuration
 
-- ```account_id``` is used when generating SNS ARNs
-- ```sns_endpoint``` can be used to explicitly override the SNS endpoint
-- ```sqs_endpoint``` can be used to explicitly override the SQS endpoint
-- ```receive_message``` can be used to define the options passed to the http://docs.aws.amazon.com/sdkforruby/api/Aws/SQS/Client.html#receive_message-instance_method
-
-The ```sns_endpoint``` and ```sqs_endpoint``` Shoryuken-specific options will also fallback to the environment variables ```AWS_SNS_ENDPOINT``` and ```AWS_SQS_ENDPOINT``` respectively, if they are set.
+[Check the Configure AWS Client documentation](https://github.com/phstc/shoryuken/wiki/Configure-the-AWS-Client)
 
 ### Rails Integration
 
@@ -146,26 +132,16 @@ The ```sns_endpoint``` and ```sqs_endpoint``` Shoryuken-specific options will al
 bundle exec shoryuken -r worker.rb -C shoryuken.yml
 ```
 
-Other options:
+For other options check `bundle exec shoryuken help start`
 
-```bash
-shoryuken --help
+#### SQS commands
 
-shoryuken [options]
-    -c, --concurrency INT            Processor threads to use
-    -d, --daemon                     Daemonize process
-    -q, --queue QUEUE[,WEIGHT]...    Queues to process with optional weights
-    -r, --require [PATH|DIR]         Location of the worker
-    -C, --config PATH                Path to YAML config file
-    -R, --rails                      Attempts to load the containing Rails project
-    -L, --logfile PATH               Path to writable logfile
-    -P, --pidfile PATH               Path to pidfile
-    -v, --verbose                    Print more verbose output
-    -V, --version                    Print version and exit
-    -h, --help                       Show help
-    ...
-```
+Check also some available SQS commands `bundle exec shoryuken help sqs`, such as:
 
+- `ls` list queues
+- `mv` move messages from one queue to another
+- `dump` dump messages from a queue into a JSON lines file
+- `requeue` requeue messages from a dump file
 
 ## More Information
 

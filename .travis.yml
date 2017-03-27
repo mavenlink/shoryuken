@@ -1,13 +1,9 @@
 language: ruby
 rvm:
-  # - 1.9.3
-  # - 1.9.2
   - 2.0.0
   - 2.1.0
   - 2.2.0
-  # - ruby-head
-  # - jruby-19mode
-  # - jruby-head
+  - 2.3.3
 
 notifications:
   email:
@@ -17,3 +13,9 @@ notifications:
 script: SPEC_ALL=true bundle exec rspec spec
 before_install:
  - gem update bundler
+after_success:
+  - bundle exec codeclimate-test-reporter
+
+addons:
+  code_climate:
+    repo_token: 7709fd21981bb9d2658647a66d959415a1029a83f1c199573828797944f26c52

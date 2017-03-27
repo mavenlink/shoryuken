@@ -1,13 +1,5 @@
 module Shoryuken
   module Util
-    def watchdog(last_words)
-      yield
-    rescue => ex
-      logger.error { last_words }
-      logger.error { ex }
-      logger.error { ex.backtrace.join("\n") }
-    end
-
     def logger
       Shoryuken.logger
     end
@@ -42,7 +34,9 @@ module Shoryuken
           && !sqs_msg.is_a?(Array) \
           && sqs_msg.message_attributes \
           && sqs_msg.message_attributes['shoryuken_class'] \
-          && sqs_msg.message_attributes['shoryuken_class'][:string_value] == ActiveJob::QueueAdapters::ShoryukenAdapter::JobWrapper.to_s
+          && sqs_msg.message_attributes['shoryuken_class'][:string_value] \
+          == ActiveJob::QueueAdapters::ShoryukenAdapter::JobWrapper.to_s \
+          && body
 
         "ActiveJob/#{body['job_class']}"
       else

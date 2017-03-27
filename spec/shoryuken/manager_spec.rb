@@ -1,122 +1,81 @@
 require 'spec_helper'
 require 'shoryuken/manager'
 
+RSpec::Matchers.define :queue_config_of do |expected|
+  match do |actual|
+    actual.name == expected
+  end
+end
+
 RSpec.describe Shoryuken::Manager do
-  subject do
-    condvar = double(:condvar)
-    allow(condvar).to receive(:signal).and_return(nil)
-    Shoryuken::Manager.new(condvar)
+  let(:queue) { 'default' }
+  let(:queues) { [queue] }
+  let(:polling_strategy) { Shoryuken::Polling::WeightedRoundRobin.new(queues) }
+  let(:fetcher) { Shoryuken::Fetcher.new }
+  let(:concurrency) { 1 }
+
+  subject { Shoryuken::Manager.new(fetcher, polling_strategy) }
+
+  before(:each) do
+    Shoryuken.options[:concurrency] = concurrency
+  end
+
+  after(:each) do
+    Shoryuken.options[:concurrency] = 1
+    TestWorker.get_shoryuken_options['batch'] = false
   end
 
   describe 'Invalid concurrency setting' do
     it 'raises ArgumentError if concurrency is not positive number' do
       Shoryuken.options[:concurrency] = -1
-      expect { Shoryuken::Manager.new(nil) }
+      expect { Shoryuken::Manager.new(nil, nil) }
         .to raise_error(ArgumentError, 'Concurrency value -1 is invalid, it needs to be a positive number')
     end
-
   end
 
-  describe 'Auto Scaling' do
-    it 'decreases weight' do
-      queue1 = 'shoryuken'
-      queue2 = 'uppercut'
-
-      Shoryuken.queues.clear
-      # [shoryuken, 2]
-      # [uppercut,  1]
-      Shoryuken.queues << queue1
-      Shoryuken.queues << queue1
-      Shoryuken.queues << queue2
-
-      expect(subject.instance_variable_get('@queues')).to eq [queue1, queue2]
-
-      subject.pause_queue!(queue1)
-
-      expect(subject.instance_variable_get('@queues')).to eq [queue2]
+  describe '#start' do
+    xit 'pauses when there are no active queues' do
+      expect(polling_strategy).to receive(:next_queue).and_return(nil)
+      expect_any_instance_of(described_class).to receive(:after)
+      subject.start
     end
 
-    it 'increases weight' do
-      queue1 = 'shoryuken'
-      queue2 = 'uppercut'
-
-      Shoryuken.queues.clear
-      # [shoryuken, 3]
-      # [uppercut,  1]
-      Shoryuken.queues << queue1
-      Shoryuken.queues << queue1
-      Shoryuken.queues << queue1
-      Shoryuken.queues << queue2
-
-      expect(subject.instance_variable_get('@queues')).to eq [queue1, queue2]
-      subject.pause_queue!(queue1)
-      expect(subject.instance_variable_get('@queues')).to eq [queue2]
-
-      subject.rebalance_queue_weight!(queue1)
-      expect(subject.instance_variable_get('@queues')).to eq [queue2, queue1]
-
-      subject.rebalance_queue_weight!(queue1)
-      expect(subject.instance_variable_get('@queues')).to eq [queue2, queue1, queue1]
-
-      subject.rebalance_queue_weight!(queue1)
-      expect(subject.instance_variable_get('@queues')).to eq [queue2, queue1, queue1, queue1]
+    xit 'calls dispatch_batch if worker wants batches' do
+      TestWorker.get_shoryuken_options['batch'] = true
+      expect_any_instance_of(described_class).to receive(:dispatch_batch).with(queue_config_of(queue))
+      expect(subject).to receive(:dispatch_later)
+      subject.start
     end
 
-    it 'adds queue back' do
-      queue1 = 'shoryuken'
-      queue2 = 'uppercut'
-
-      Shoryuken.queues.clear
-      # [shoryuken, 2]
-      # [uppercut,  1]
-      Shoryuken.queues << queue1
-      Shoryuken.queues << queue1
-      Shoryuken.queues << queue2
-
-      Shoryuken.options[:delay] = 0.1
-
-      fetcher = double('Fetcher').as_null_object
-      subject.fetcher = fetcher
-
-      subject.pause_queue!(queue1)
-      expect(subject.instance_variable_get('@queues')).to eq [queue2]
-
-      sleep 0.5
-
-      expect(subject.instance_variable_get('@queues')).to eq [queue2, queue1]
+    xit 'calls dispatch_single_messages if worker wants single messages' do
+      expect_any_instance_of(described_class).to receive(:dispatch_single_messages).
+        with(queue_config_of(queue))
+      expect(subject).to receive(:dispatch_later)
+      subject.start
     end
   end
 
-  describe '#next_queue' do
-    it 'returns queues' do
-      queue1 = 'shoryuken'
-      queue2 = 'uppercut'
-
-      Shoryuken.queues.clear
-
-      Shoryuken.register_worker queue1, TestWorker
-      Shoryuken.register_worker queue2, TestWorker
-
-      Shoryuken.queues << queue1
-      Shoryuken.queues << queue2
-
-      expect(subject.send :next_queue).to eq queue1
-      expect(subject.send :next_queue).to eq queue2
+  describe '#dispatch_batch' do
+    it 'assings batch as a single message' do
+      q = polling_strategy.next_queue
+      messages = [1, 2, 3]
+      expect(fetcher).to receive(:fetch).with(q, described_class::BATCH_LIMIT).and_return(messages)
+      expect_any_instance_of(described_class).to receive(:assign).with(q.name, messages)
+      subject.send(:dispatch_batch, q)
     end
+  end
 
-    it 'skips when no worker' do
-      queue1 = 'shoryuken'
-      queue2 = 'uppercut'
+  describe '#dispatch_single_messages' do
+    let(:concurrency) { 3 }
 
-      Shoryuken.queues.clear
-
-      Shoryuken.register_worker queue2, TestWorker
-
-      Shoryuken.queues << queue1
-      Shoryuken.queues << queue2
-
-      expect(subject.send :next_queue).to eq queue2
-      expect(subject.send :next_queue).to eq queue2
+    it 'assings messages from batch one by one' do
+      q = polling_strategy.next_queue
+      messages = [1, 2, 3]
+      expect(fetcher).to receive(:fetch).with(q, concurrency).and_return(messages)
+      expect_any_instance_of(described_class).to receive(:assign).with(q.name, 1)
+      expect_any_instance_of(described_class).to receive(:assign).with(q.name, 2)
+      expect_any_instance_of(described_class).to receive(:assign).with(q.name, 3)
+      subject.send(:dispatch_single_messages, q)
     end
   end
 end
