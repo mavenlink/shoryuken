@@ -1,6 +1,8 @@
 require 'yaml'
+require 'json'
 require 'aws-sdk-core'
 require 'time'
+require 'concurrent'
 
 require 'shoryuken/version'
 require 'shoryuken/core_ext'
@@ -15,10 +17,14 @@ require 'shoryuken/worker_registry'
 require 'shoryuken/default_worker_registry'
 require 'shoryuken/middleware/chain'
 require 'shoryuken/middleware/server/auto_delete'
+Shoryuken::Middleware::Server.autoload :AutoExtendVisibility, 'shoryuken/middleware/server/auto_extend_visibility'
 require 'shoryuken/middleware/server/exponential_backoff_retry'
 require 'shoryuken/middleware/server/timing'
-require 'shoryuken/sns_arn'
-require 'shoryuken/topic'
+require 'shoryuken/polling'
+require 'shoryuken/manager'
+require 'shoryuken/launcher'
+require 'shoryuken/processor'
+require 'shoryuken/fetcher'
 
 module Shoryuken
   DEFAULTS = {
@@ -30,21 +36,78 @@ module Shoryuken
     lifecycle_events: {
       startup: [],
       quiet: [],
-      shutdown: [],
-    }
-  }
+      shutdown: []
+    },
+    polling_strategy: Polling::WeightedRoundRobin
+  }.freeze
 
-  @@queues = []
-  @@worker_registry = DefaultWorkerRegistry.new
+  @@queues                          = []
+  @@worker_registry                 = DefaultWorkerRegistry.new
   @@active_job_queue_name_prefixing = false
+  @@sqs_client                      = nil
+  @@sqs_client_receive_message_opts = {}
+  @@start_callback                  = nil
+  @@stop_callback                   = nil
 
   class << self
-    def options
-      @options ||= DEFAULTS.dup
-    end
-
     def queues
       @@queues
+    end
+
+    def add_queue(queue, priority = 1)
+      priority.times { queues << queue }
+    end
+
+    def worker_registry
+      @@worker_registry
+    end
+
+    def worker_registry=(worker_registry)
+      @@worker_registry = worker_registry
+    end
+
+    def start_callback
+      @@start_callback
+    end
+
+    def start_callback=(start_callback)
+      @@start_callback = start_callback
+    end
+
+    def stop_callback
+      @@stop_callback
+    end
+
+    def stop_callback=(stop_callback)
+      @@stop_callback = stop_callback
+    end
+
+    def active_job_queue_name_prefixing
+      @@active_job_queue_name_prefixing
+    end
+
+    def active_job_queue_name_prefixing=(active_job_queue_name_prefixing)
+      @@active_job_queue_name_prefixing = active_job_queue_name_prefixing
+    end
+
+    def sqs_client
+      @@sqs_client ||= Aws::SQS::Client.new
+    end
+
+    def sqs_client=(sqs_client)
+      @@sqs_client = sqs_client
+    end
+
+    def sqs_client_receive_message_opts
+      @@sqs_client_receive_message_opts
+    end
+
+    def sqs_client_receive_message_opts=(sqs_client_receive_message_opts)
+      @@sqs_client_receive_message_opts = sqs_client_receive_message_opts
+    end
+
+    def options
+      @@options ||= DEFAULTS.dup
     end
 
     def logger
@@ -52,23 +115,7 @@ module Shoryuken
     end
 
     def register_worker(*args)
-      worker_registry.register_worker(*args)
-    end
-
-    def worker_registry=(worker_registry)
-      @@worker_registry = worker_registry
-    end
-
-    def worker_registry
-      @@worker_registry
-    end
-
-    def active_job_queue_name_prefixing
-      @@active_job_queue_name_prefixing
-    end
-
-    def active_job_queue_name_prefixing=(prefixing)
-      @@active_job_queue_name_prefixing = prefixing
+      @@worker_registry.register_worker(*args)
     end
 
     def configure_server
@@ -76,19 +123,19 @@ module Shoryuken
     end
 
     def server_middleware
-      @server_chain ||= default_server_middleware
-      yield @server_chain if block_given?
-      @server_chain
+      @@server_chain ||= default_server_middleware
+      yield @@server_chain if block_given?
+      @@server_chain
     end
 
     def configure_client
-      yield self
+      yield self unless server?
     end
 
     def client_middleware
-      @client_chain ||= default_client_middleware
-      yield @client_chain if block_given?
-      @client_chain
+      @@client_chain ||= default_client_middleware
+      yield @@client_chain if block_given?
+      @@client_chain
     end
 
     def default_worker_options
@@ -107,16 +154,16 @@ module Shoryuken
       @@default_worker_options = options
     end
 
-    def on_aws_initialization(&block)
-      @aws_initialization_callback = block
+    def default_worker_options=(default_worker_options)
+      @@default_worker_options = default_worker_options
     end
 
     def on_start(&block)
-      @start_callback = block
+      @@start_callback = block
     end
 
     def on_stop(&block)
-      @stop_callback = block
+      @@stop_callback = block
     end
 
     # Register a block to run at a point in the Shoryuken lifecycle.
@@ -133,10 +180,6 @@ module Shoryuken
       options[:lifecycle_events][event] << block
     end
 
-    attr_reader :aws_initialization_callback,
-                :start_callback,
-                :stop_callback
-
     private
 
     def default_server_middleware
@@ -144,6 +187,7 @@ module Shoryuken
         m.add Middleware::Server::Timing
         m.add Middleware::Server::ExponentialBackoffRetry
         m.add Middleware::Server::AutoDelete
+        m.add Middleware::Server::AutoExtendVisibility
         if defined?(::ActiveRecord::Base)
           require 'shoryuken/middleware/server/active_record'
           m.add Middleware::Server::ActiveRecord
